@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-data = ["kaggle>=1.6"]
+data = ["kaggle>=1.6", "six>=1.16"]  # kaggle imports six without declaring it
 
 [dependency-groups]
 dev = [
