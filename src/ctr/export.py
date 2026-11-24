@@ -35,15 +35,30 @@ def _days(df: pd.DataFrame) -> list[str]:
     return [str(days.min().date()), str(days.max().date())]
 
 
-def train_bundle(df: pd.DataFrame, name: str, **kwargs: Any) -> ModelBundle:
-    """Fit one model on the training days and score it on the test day."""
-    split = split_by_day(df)
+def train_bundle(df: pd.DataFrame, name: str, test_days: int = 1, **kwargs: Any) -> ModelBundle:
+    """Fit one model on the training days and score it on the held-out days.
+
+    With test_days=1 (the default) the last day is the test day and the day
+    before it is for early stopping. With test_days=0 there is no test day: the
+    last day is used for early stopping and its metrics are reported instead.
+    The daily pipeline uses that, because its test day hasn't happened yet.
+    """
+    if test_days:
+        split = split_by_day(df, test_days=test_days)
+        train, valid, test = split.train, split.valid, split.test
+    else:
+        day = df[TIMESTAMP].dt.normalize()
+        if day.nunique() < 2:
+            raise ValueError("Need at least 2 days of data")
+        train = df[day < day.max()].reset_index(drop=True)
+        valid = test = df[day == day.max()].reset_index(drop=True)
+
     t0 = time.perf_counter()
-    model = build_model(name, **kwargs).fit(split.train, split.valid)
+    model = build_model(name, **kwargs).fit(train, valid)
     fit_seconds = time.perf_counter() - t0
 
-    base_rate = float(split.train[LABEL].mean())
-    test = evaluate(split.test[LABEL].to_numpy(), model.predict_proba(split.test), base_rate)
+    base_rate = float(train[LABEL].mean())
+    test_metrics = evaluate(test[LABEL].to_numpy(), model.predict_proba(test), base_rate)
     metadata = {
         "model": name,
         "package_version": __version__,
@@ -52,13 +67,13 @@ def train_bundle(df: pd.DataFrame, name: str, **kwargs: Any) -> ModelBundle:
         "fit_seconds": round(fit_seconds, 1),
         "features": list(FIELDS),
         "data": {
-            "train_days": _days(split.train),
-            "valid_days": _days(split.valid),
-            "test_days": _days(split.test),
-            "train_rows": len(split.train),
+            "train_days": _days(train),
+            "valid_days": _days(valid),
+            "test_days": _days(test),
+            "train_rows": len(train),
             "train_ctr": base_rate,
         },
-        "test_metrics": test,
+        "test_metrics": test_metrics,
     }
     return ModelBundle(model=model, metadata=metadata)
 

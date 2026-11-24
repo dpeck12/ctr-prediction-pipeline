@@ -65,3 +65,30 @@ jobs:
       - name: Container logs
         if: failure()
         run: docker logs ctr-api
+
+  airflow:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      AIRFLOW_VERSION: "3.4.0"
+      AIRFLOW_HOME: ${{ github.workspace }}/.airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Airflow and the package
+        run: |
+          CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-3.11.txt"
+          pip install "apache-airflow==${AIRFLOW_VERSION}" lightgbm pandas pyarrow scikit-learn \
+            scipy matplotlib joblib pytest --constraint "$CONSTRAINTS"
+          pip install --no-deps .
+
+      - name: Set up the Airflow database
+        run: airflow db migrate
+
+      - name: Run the DAG for two days
+        run: pytest tests/test_dag.py -o addopts="" -v

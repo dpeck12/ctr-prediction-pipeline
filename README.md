@@ -2,7 +2,7 @@
 
 An end-to-end click-through-rate (CTR) prediction system built on public ad data. It covers the whole lifecycle, not just the model: time-aware evaluation, a served prediction API, scheduled retraining with Airflow, and monitoring for drift.
 
-> 🚧 **Work in progress.** Phases 0–3 are done: the best model, DCN-v2, reaches a test AUC of 0.737 and normalised entropy of 0.878 (see [model comparison](#model-comparison-phase-2)), and the prediction API answers in under 5 ms at the median (see [serving](#serving-phase-3)). See the [roadmap](#roadmap) for what's next.
+> 🚧 **Work in progress.** Phases 0–4 are done: the best model, DCN-v2, reaches a test AUC of 0.737 and normalised entropy of 0.878 (see [model comparison](#model-comparison-phase-2)), the prediction API answers in under 5 ms at the median (see [serving](#serving-phase-3)), and an Airflow DAG retrains and monitors the model daily (see [phase 4](#daily-retraining-and-monitoring-phase-4)). See the [roadmap](#roadmap) for what's next.
 
 ## Why
 
@@ -20,7 +20,7 @@ Only the labelled `train.gz` file is used. It's split **by day, not at random**:
 - [x] **1. Baseline:** hashed logistic regression; log loss, AUC, normalised entropy and calibration
 - [x] **2. Better models:** LightGBM and a deep CTR model (DCN-v2), calibration, MLflow tracking
 - [x] **3. Serving:** FastAPI prediction service in Docker, with a latency benchmark *(cloud deployment not done yet)*
-- [ ] **4. Pipeline and monitoring:** Airflow DAG that replays the data day by day to retrain and evaluate, with drift checks
+- [x] **4. Pipeline and monitoring:** Airflow DAG that replays the data day by day to retrain and evaluate, with drift checks
 - [ ] **5. Bidding simulation:** turn predicted CTR into bids under a daily budget and compare clicks per £ with a flat bid
 - [ ] **6. Write-up:** architecture diagram, results and lessons learned
 
@@ -132,7 +132,7 @@ Save a trained model, then serve it:
 uv run python -m ctr.export --models lightgbm             # writes artifacts/lightgbm/
 MODEL_PATH=artifacts/lightgbm uv run python -m uvicorn ctr.serving.app:app --port 8080
 curl -X POST localhost:8080/predict -H 'Content-Type: application/json' -d @examples/request.json
-# {"model":"lightgbm","probabilities":[0.153...,0.188...]}
+# {"model":"lightgbm","probabilities":[0.1990,0.1229]}  (rounded)
 ```
 
 Or in Docker (the model is baked into the image, so each image is one model version):
@@ -171,6 +171,54 @@ Single-impression latency over 2,000 requests on a Windows laptop (12-thread Int
 
 Reproduce: `uv run python -m ctr.serving.benchmark --model-path artifacts/logreg artifacts/lightgbm artifacts/dcn --requests 2000`. These are laptop numbers, so expect them to vary from run to run and to differ on a Linux server.
 
+## Daily retraining and monitoring (phase 4)
+
+An Airflow DAG, `ctr_daily`, treats the 10 days as if they were arriving live. For each day D from 24 to 30 October, it runs:
+
+1. **`check_drift`:** the population stability index (PSI) of every feature, day D's traffic against the training days. This needs no click labels, so in production it could run as traffic arrives.
+2. **`train_challenger`:** train LightGBM on every day before D−1, stop early on D−1, and save the model as version D in a simple on-disk registry.
+3. **`promote`:** the new model (the challenger) replaces the current one (the champion) only if its log loss on D−1 is no more than 0.1% worse.
+4. **`evaluate`:** once D's clicks are known, score D with the champion and with a model that was never retrained (the first one), and check whether the model's prediction distribution has shifted since the day before.
+
+The steps are plain functions in `ctr/pipeline/`. Airflow only schedules them, so the same logic runs without Airflow:
+
+```bash
+uv run python -m ctr.pipeline prepare --data data/raw/train.gz   # one Parquet file per day
+uv run python -m ctr.pipeline replay                             # all days, as the DAG would
+```
+
+Or in Airflow 3.4. The DAG starts unpaused and works through the days in order:
+
+```bash
+docker compose up --build    # Airflow UI on http://localhost:8081
+```
+
+CI installs Airflow on Linux and runs the real DAG for two days on synthetic data.
+
+### Results
+
+Same 5% sample as earlier phases:
+
+| Day | Click rate | Log loss, retrained daily | Log loss, never retrained | Calibration ratio | Score PSI vs day before |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 24 Oct | 17.53% | 0.4173 | 0.4173 | 1.043 | 0.021 |
+| 25 Oct | 18.40% | 0.4224 | 0.4258 | 1.026 | 0.016 |
+| 26 Oct | 18.31% | 0.4246 | 0.4292 | 1.006 | 0.010 |
+| 27 Oct | 18.12% | 0.4164 | 0.4233 | 1.011 | 0.010 |
+| 28 Oct | 15.20% | 0.3771 | 0.3815 | 1.090 | 0.028 |
+| 29 Oct | 15.57% | 0.3862 | 0.3920 | 1.052 | 0.011 |
+| 30 Oct | 16.95% | 0.4036 | 0.4136 | 1.067 | **0.146** |
+
+<img src="docs/pipeline_timeline.png" alt="Three panels over 24–30 October: log loss of the retrained vs never-retrained model, actual vs mean predicted click rate, and maximum feature PSI per day" width="420" align="right">
+
+- **Daily retraining pays off, and more so over time.** The never-retrained model's log loss is 0.8% worse after one day and 2.4% worse after six; 1.4% worse on average. Every day's challenger was promoted.
+- **The day 30 champion matches phase 2 exactly** (0.40357), as it should: same training days, model and settings. The pipeline reproduces the offline experiment.
+- **Click rate drops sharply on 28 October** (18.1% → 15.2%), and the model over-predicts for the rest of the week (calibration ratio 1.05–1.09). This is the shift that made Platt scaling backfire in phase 2. Retraining helps, but the newest day only gets used for early stopping, so the model is always a day behind.
+- **Feature PSI raised an alarm every single day, so as configured it's useless.** The maximum is 0.9–2.0, far above the 0.25 "major" threshold, and 5–12 fields are flagged daily. The worst fields (C17, C21, C19, app_id) look like campaign and app IDs, whose most common values churn every day in normal ad traffic. A fixed threshold can't separate that churn from a real problem. The fix is to compare each field's PSI with its own normal day-to-day range, which is next on the list.
+- **Prediction-distribution PSI was quiet (0.01–0.03) until 30 October (0.146, moderate)**, the day the never-retrained model fell furthest behind. It's the more useful alarm here.
+
+<br clear="right">
+
 ## Project layout
 
 ```
@@ -186,6 +234,10 @@ src/ctr/
   train.py           phase 2: train, calibrate and compare models (CLI)
   export.py          phase 3: train and save models for serving (CLI)
   serving/           FastAPI app, request schema, saved-model bundle, latency benchmark
+  pipeline/          phase 4: daily store, drift checks, model registry, daily steps (CLI)
+airflow/
+  dags/ctr_daily.py  the daily DAG
+  Dockerfile         Airflow 3.4 image with this package installed
   tracking.py        MLflow logging
   report.py          metrics.json, results table, reliability plot
   sample.py          synthetic Avazu-format data for tests and CI

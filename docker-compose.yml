@@ -1,0 +1,29 @@
+# Local Airflow for the ctr_daily DAG.
+#
+#   uv run python -m ctr.pipeline prepare --data data/raw/train.gz   # daily Parquet files
+#   docker compose up --build
+#
+# Airflow UI: http://localhost:8081 (no login: local use only). The DAG starts
+# unpaused, so Airflow immediately replays 24-30 October 2014, one run per day.
+# Models land in artifacts/registry/ and reports in reports/pipeline/.
+
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    command: standalone
+    ports:
+      - "8081:8080"  # 8080 is left for the prediction API
+    environment:
+      CTR_ROOT: /opt/ctr
+      CTR_MODEL: lightgbm
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      # Local only: every user is an admin and no login is needed.
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./data:/opt/ctr/data
+      - ./artifacts:/opt/ctr/artifacts
+      - ./reports:/opt/ctr/reports
