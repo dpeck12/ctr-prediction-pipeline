@@ -32,7 +32,7 @@ def dag(tmp_path_factory):
 
     from airflow.dag_processing.dagbag import DagBag
 
-    bag = DagBag(dag_folder=str(DAGS), include_examples=False)
+    bag = DagBag(dag_folder=str(DAGS))  # example DAGs are off via AIRFLOW__CORE__LOAD_EXAMPLES
     assert bag.import_errors == {}
     return bag.get_dag("ctr_daily"), root
 
