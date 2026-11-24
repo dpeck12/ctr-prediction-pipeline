@@ -14,6 +14,14 @@ def test_transform_shape_and_one_token_per_feature(raw_csv):
     assert (x.sum(axis=1) == featurizer.tokens_per_row).all()
 
 
+def test_index_matches_feature_hasher():
+    featurizer = HashingFeaturizer(n_features=2**10)
+    tokens = [f"col{i}=value{i * 7919}" for i in range(2_000)]
+    x = featurizer._hasher.transform([[t] for t in tokens])
+
+    assert [featurizer.index(t) for t in tokens] == x.indices.tolist()
+
+
 def test_transform_is_deterministic(raw_csv):
     df = load_avazu(raw_csv, nrows=50)
     a = HashingFeaturizer(2**16).transform(df)

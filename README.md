@@ -2,7 +2,7 @@
 
 An end-to-end click-through-rate (CTR) prediction system built on public ad data. It covers the whole lifecycle, not just the model: time-aware evaluation, a served prediction API, scheduled retraining with Airflow, and monitoring for drift.
 
-> 🚧 **Work in progress.** Phases 0–2 are done: the best model, DCN-v2, reaches a test AUC of 0.737 and normalised entropy of 0.878 (see [model comparison](#model-comparison-phase-2)). See the [roadmap](#roadmap) for what's next.
+> 🚧 **Work in progress.** Phases 0–3 are done: the best model, DCN-v2, reaches a test AUC of 0.737 and normalised entropy of 0.878 (see [model comparison](#model-comparison-phase-2)), and the prediction API answers in under 5 ms at the median (see [serving](#serving-phase-3)). See the [roadmap](#roadmap) for what's next.
 
 ## Why
 
@@ -19,7 +19,7 @@ Only the labelled `train.gz` file is used. It's split **by day, not at random**:
 - [x] **0. Scaffold:** packaging with `uv`, lint, tests, CI on synthetic data, data download
 - [x] **1. Baseline:** hashed logistic regression; log loss, AUC, normalised entropy and calibration
 - [x] **2. Better models:** LightGBM and a deep CTR model (DCN-v2), calibration, MLflow tracking
-- [ ] **3. Serving:** FastAPI prediction service in Docker on Cloud Run, with a latency benchmark
+- [x] **3. Serving:** FastAPI prediction service in Docker, with a latency benchmark *(cloud deployment not done yet)*
 - [ ] **4. Pipeline and monitoring:** Airflow DAG that replays the data day by day to retrain and evaluate, with drift checks
 - [ ] **5. Bidding simulation:** turn predicted CTR into bids under a daily budget and compare clicks per £ with a flat bid
 - [ ] **6. Write-up:** architecture diagram, results and lessons learned
@@ -124,6 +124,53 @@ These are single runs on a 5% sample with one seed. Next steps that could move t
 
 <br clear="right">
 
+## Serving (phase 3)
+
+Save a trained model, then serve it:
+
+```bash
+uv run python -m ctr.export --models lightgbm             # writes artifacts/lightgbm/
+MODEL_PATH=artifacts/lightgbm uv run python -m uvicorn ctr.serving.app:app --port 8080
+curl -X POST localhost:8080/predict -H 'Content-Type: application/json' -d @examples/request.json
+# {"model":"lightgbm","probabilities":[0.153...,0.188...]}
+```
+
+Or in Docker (the model is baked into the image, so each image is one model version):
+
+```bash
+docker build -t ctr-api --build-arg MODEL_DIR=artifacts/lightgbm .
+docker run -p 8080:8080 ctr-api
+```
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /predict` | Click probabilities for 1–1,000 impressions in Avazu's raw format. Every field except `hour` is optional; missing or never-seen values are handled like rare ones. |
+| `GET /model` | What's running: model, settings, training days and test-day metrics |
+| `GET /health` | Liveness check |
+| `GET /docs` | Interactive API docs |
+
+A saved model (`ctr.export`) is the fitted model plus its encoders in `model.joblib`, and a `metadata.json` recording its training days, settings and test-day metrics. CI builds the Docker image on every push, starts it, and checks `/health` and `/predict` against [`examples/request.json`](examples/request.json).
+
+### Latency
+
+Real-time bidding usually allows the whole bid about 10 ms, so the model's share needs to be a millisecond or two.
+
+The first version scored a request the same way as a batch: build a one-row pandas DataFrame, encode it column by column, call the model. That took **10–40 ms per impression**, mostly pandas overhead that only pays off across millions of rows. So each model now also has a `predict_records` fast path. It encodes one impression with plain dictionary lookups and calls the model directly: the hashed weights summed for logistic regression, the raw LightGBM booster, the PyTorch network. Tests check it gives the same probabilities as the batch path, to within 10⁻¹².
+
+Single-impression latency over 2,000 requests on a Windows laptop (12-thread Intel CPU, one run):
+
+| Model | Batch path, in-process (p50 / p99) | Fast path, in-process (p50 / p99) | Speed-up at p50 | HTTP round trip (p50 / p99) |
+| --- | ---: | ---: | ---: | ---: |
+| Logistic regression | 10.3 / 44.4 ms | **0.02 / 0.13 ms** | 490× | 2.8 / 5.1 ms |
+| LightGBM | 40.0 / 79.0 ms | **0.19 / 0.48 ms** | 210× | 4.8 / 12.5 ms |
+| DCN-v2 | 14.9 / 46.5 ms | **0.33 / 1.91 ms** | 46× | 4.5 / 7.1 ms |
+
+- **The model is no longer the bottleneck.** With the fast path, prediction is under 0.5 ms at p50 for every model. Most of the 3–5 ms HTTP round trip is the web stack: JSON parsing, request validation and the local network loop.
+- **Logistic regression is the cheapest to serve** by an order of magnitude: about 23 dictionary lookups and a sum.
+- **LightGBM's saved model is the largest** (43 MB, against 8 MB for logistic regression and 6 MB for DCN-v2). It stores a training count for every value seen, including millions of device IPs.
+
+Reproduce: `uv run python -m ctr.serving.benchmark --model-path artifacts/logreg artifacts/lightgbm artifacts/dcn --requests 2000`. These are laptop numbers, so expect them to vary from run to run and to differ on a Linux server.
+
 ## Project layout
 
 ```
@@ -137,6 +184,8 @@ src/ctr/
   metrics.py         log loss, normalised entropy, calibration
   train_baseline.py  phase 1: logistic regression with a C search (CLI)
   train.py           phase 2: train, calibrate and compare models (CLI)
+  export.py          phase 3: train and save models for serving (CLI)
+  serving/           FastAPI app, request schema, saved-model bundle, latency benchmark
   tracking.py        MLflow logging
   report.py          metrics.json, results table, reliability plot
   sample.py          synthetic Avazu-format data for tests and CI

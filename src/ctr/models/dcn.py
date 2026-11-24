@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -20,7 +20,7 @@ from sklearn.metrics import log_loss
 from torch import nn
 from torch.nn import functional as F
 
-from ctr.encoders import VocabEncoder, make_fields
+from ctr.encoders import VocabEncoder, make_fields, record_fields
 from ctr.schema import LABEL
 
 log = logging.getLogger(__name__)
@@ -160,6 +160,10 @@ class DCNModel:
 
     def predict_proba(self, df: pd.DataFrame) -> np.ndarray:
         return self._predict(self._encode(df))
+
+    def predict_records(self, records: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        codes = self.encoder.transform_records([record_fields(r) for r in records])
+        return self._predict(torch.from_numpy(codes))
 
     def params(self) -> dict[str, Any]:
         params = {

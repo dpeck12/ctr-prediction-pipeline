@@ -1,6 +1,7 @@
 # Data and model outputs never go in git
 /data/
 /models/
+/artifacts/
 mlruns/
 mlartifacts/
 

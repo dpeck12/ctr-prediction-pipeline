@@ -17,7 +17,7 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: uv sync --locked
+        run: uv sync --locked --all-extras
 
       - name: Lint
         run: |
@@ -26,3 +26,42 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Train a small model on synthetic data
+        run: |
+          uv sync --locked
+          uv run python -c "from ctr.sample import make_synthetic; make_synthetic(n_rows=20000).to_csv('synthetic.csv', index=False)"
+          uv run python -m ctr.export --data synthetic.csv --sample-frac 1 --models lightgbm \
+            --model-kwargs '{"lightgbm": {"n_estimators": 100}}'
+
+      - name: Build image
+        run: docker build -t ctr-api --build-arg MODEL_DIR=artifacts/lightgbm .
+
+      - name: Smoke test the container
+        run: |
+          docker run -d --name ctr-api -p 8080:8080 ctr-api
+          for i in $(seq 1 30); do curl -sf localhost:8080/health && break; sleep 1; done
+          curl -sf localhost:8080/health | jq -e '.status == "ok" and .model == "lightgbm"'
+          curl -sf -X POST localhost:8080/predict -H 'Content-Type: application/json' \
+            -d @examples/request.json | tee response.json
+          jq -e '(.probabilities | length) == 2 and all(.probabilities[]; . > 0 and . < 1)' response.json
+          docker inspect --format '{{.Config.User}}' ctr-api | grep -qx app
+
+      - name: Image size
+        if: always()
+        run: docker image ls ctr-api --format '{{.Size}}'
+
+      - name: Container logs
+        if: failure()
+        run: docker logs ctr-api

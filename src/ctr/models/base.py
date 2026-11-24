@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 import numpy as np
@@ -17,6 +18,14 @@ class CTRModel(Protocol):
 
     def predict_proba(self, df: pd.DataFrame) -> np.ndarray:
         """Click probability for each row."""
+        ...
+
+    def predict_records(self, records: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        """Same as predict_proba, for raw impression dicts, without pandas.
+
+        The fast path for serving: a one-row DataFrame costs milliseconds to
+        build and encode, while dict lookups take microseconds.
+        """
         ...
 
     def params(self) -> dict[str, Any]:

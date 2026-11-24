@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from ctr.encoders import GBMEncoder, make_fields
+from ctr.encoders import GBMEncoder, make_fields, record_fields
 from ctr.schema import LABEL
 
 
@@ -72,6 +73,11 @@ class LightGBMModel:
     def predict_proba(self, df: pd.DataFrame) -> np.ndarray:
         x = self.encoder.transform(make_fields(df))
         return self.model.predict_proba(x, num_iteration=self.best_iteration)[:, 1]
+
+    def predict_records(self, records: Sequence[Mapping[str, Any]]) -> np.ndarray:
+        x = self.encoder.transform_records([record_fields(r) for r in records])
+        # The raw booster skips the sklearn wrapper's pandas validation.
+        return np.asarray(self.model.booster_.predict(x, num_iteration=self.best_iteration))
 
     def params(self) -> dict[str, Any]:
         params = {

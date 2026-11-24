@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from ctr.encoders import FIELDS, GBMEncoder, VocabEncoder, make_fields
+from ctr.encoders import FIELDS, GBMEncoder, VocabEncoder, make_fields, record_fields
 from ctr.schema import TIMESTAMP
 
 
@@ -18,6 +18,34 @@ def test_make_fields_adds_time_fields_as_strings(raw_csv):
     assert tuple(fields.columns) == FIELDS
     assert (fields["hour_of_day"] == df[TIMESTAMP].dt.hour.astype("string")).all()
     assert all(fields[col].dtype == "string" for col in fields.columns)
+
+
+def test_record_fields_matches_make_fields():
+    from ctr.sample import make_synthetic
+    from ctr.schema import CATEGORICAL_COLUMNS, RAW_TIME
+
+    raw = make_synthetic(n_rows=500, seed=8)
+    raw.loc[0, "site_id"] = None
+    records = raw[[RAW_TIME, *CATEGORICAL_COLUMNS]].to_dict(orient="records")
+    df = raw.drop(columns=["id", "click"])
+    df[TIMESTAMP] = pd.to_datetime(df.pop(RAW_TIME), format="%y%m%d%H")
+    df = df.astype({col: "string" for col in CATEGORICAL_COLUMNS})
+
+    expected = make_fields(df).to_numpy().tolist()
+    assert [record_fields(r) for r in records] == expected
+
+
+def test_encoders_record_path_matches_frame_path(raw_csv):
+    from ctr.data import load_avazu
+
+    fields = make_fields(load_avazu(raw_csv))
+    train, test = fields.iloc[:1500], fields.iloc[1500:]
+    rows = test.to_numpy().tolist()
+
+    vocab = VocabEncoder(min_count=3).fit(train)
+    np.testing.assert_array_equal(vocab.transform_records(rows), vocab.transform(test))
+    gbm = GBMEncoder(max_categories=5).fit(train)
+    np.testing.assert_array_equal(gbm.transform_records(rows), gbm.transform(test).to_numpy())
 
 
 def test_vocab_encoder_maps_rare_and_unseen_to_zero():

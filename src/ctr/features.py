@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import pandas as pd
 from scipy import sparse
 from sklearn.feature_extraction import FeatureHasher
+from sklearn.utils import murmurhash3_32
 
 from ctr.schema import CATEGORICAL_COLUMNS, TIMESTAMP
 
@@ -42,6 +43,13 @@ class HashingFeaturizer:
         cols.append("hour_of_day=" + df[TIMESTAMP].dt.hour.astype("string"))
         cols.append("day_of_week=" + df[TIMESTAMP].dt.day_of_week.astype("string"))
         return cols
+
+    def index(self, token: str) -> int:
+        """Column a token hashes to; matches FeatureHasher (seed 0, signed murmurhash3)."""
+        h = murmurhash3_32(token, seed=0)
+        if h == -(2**31):  # abs() would overflow in FeatureHasher's C code
+            return (2**31 - 1 - (self.n_features - 1)) % self.n_features
+        return abs(h) % self.n_features
 
     def transform(self, df: pd.DataFrame) -> sparse.csr_matrix:
         rows = zip(*(col.tolist() for col in self.tokens(df)), strict=True)

@@ -8,14 +8,40 @@ on a later day, share a single "unknown" code.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping, Sequence
+from datetime import date
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
-from ctr.schema import CATEGORICAL_COLUMNS, TIMESTAMP
+from ctr.schema import CATEGORICAL_COLUMNS, RAW_TIME, TIMESTAMP
 
 TIME_FIELDS = ("hour_of_day", "day_of_week")
 FIELDS: tuple[str, ...] = (*CATEGORICAL_COLUMNS, *TIME_FIELDS)
 MISSING = "<NA>"
+
+
+def _is_missing(value: Any) -> bool:
+    """None, or NaN (how pandas hands back a missing value in to_dict)."""
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
+def record_fields(record: Mapping[str, Any]) -> list[str]:
+    """One raw impression (a dict with `hour` as YYMMDDHH) -> its values in FIELDS order.
+
+    The no-pandas twin of make_fields, for scoring single requests quickly. Gives
+    exactly the same strings, so both paths hit the same encodings.
+    """
+    hour = record[RAW_TIME]
+    day = date(2000 + int(hour[0:2]), int(hour[2:4]), int(hour[4:6]))
+    values = [record.get(col) for col in CATEGORICAL_COLUMNS]
+    return [
+        *(MISSING if _is_missing(value) else str(value) for value in values),
+        str(int(hour[6:8])),
+        str(day.weekday()),
+    ]
 
 
 def make_fields(df: pd.DataFrame) -> pd.DataFrame:
@@ -50,10 +76,24 @@ class VocabEncoder:
 
     def transform(self, fields: pd.DataFrame) -> np.ndarray:
         codes = [
-            pd.Categorical(fields[col], categories=values).codes.astype(np.int64) + 1
+            values.get_indexer(fields[col]).astype(np.int64) + 1  # unseen -> -1 -> 0
             for col, values in self.vocab.items()
         ]
         return np.stack(codes, axis=1)
+
+    def transform_records(self, rows: Sequence[Sequence[str]]) -> np.ndarray:
+        """Like transform, for rows from record_fields, using plain dict lookups."""
+        if not hasattr(self, "_lookup"):
+            self._lookup = [
+                {value: i + 1 for i, value in enumerate(values)} for values in self.vocab.values()
+            ]
+        return np.array(
+            [
+                [lookup.get(v, 0) for lookup, v in zip(self._lookup, row, strict=True)]
+                for row in rows
+            ],
+            dtype=np.int64,
+        )
 
 
 class GBMEncoder:
@@ -85,7 +125,19 @@ class GBMEncoder:
         out = {}
         for col, counts in self.counts.items():
             out[f"{col}_count"] = fields[col].map(counts).fillna(0).astype("float32").to_numpy()
-            out[f"{col}_cat"] = pd.Categorical(fields[col], categories=self.top[col]).codes.astype(
-                np.int32
-            )
+            out[f"{col}_cat"] = self.top[col].get_indexer(fields[col]).astype(np.int32)
         return pd.DataFrame(out, index=fields.index)
+
+    def transform_records(self, rows: Sequence[Sequence[str]]) -> np.ndarray:
+        """Like transform (same column order, as floats), for rows from record_fields."""
+        if not hasattr(self, "_lookup"):
+            self._lookup = [
+                (self.counts[col].to_dict(), {v: i for i, v in enumerate(self.top[col])})
+                for col in self.counts
+            ]
+        out = np.empty((len(rows), 2 * len(self._lookup)), dtype=np.float64)
+        for r, row in enumerate(rows):
+            for f, ((counts, codes), value) in enumerate(zip(self._lookup, row, strict=True)):
+                out[r, 2 * f] = counts.get(value, 0)
+                out[r, 2 * f + 1] = codes.get(value, -1)
+        return out
