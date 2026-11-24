@@ -12,6 +12,9 @@ dependencies = [
     "matplotlib>=3.8",
     "scikit-learn>=1.4",
     "scipy>=1.11",
+    "lightgbm>=4.7",  # eval_X/eval_y API
+    "torch>=2.3",
+    "mlflow>=2.14",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +27,15 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
 ]
+
+# CPU-only PyTorch wheels: the default Linux wheel pulls in ~1 GB of CUDA libraries.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

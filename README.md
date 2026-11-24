@@ -2,7 +2,7 @@
 
 An end-to-end click-through-rate (CTR) prediction system built on public ad data. It covers the whole lifecycle, not just the model: time-aware evaluation, a served prediction API, scheduled retraining with Airflow, and monitoring for drift.
 
-> 🚧 **Work in progress.** Phases 0 and 1 are done: the baseline reaches a test AUC of 0.736 and normalised entropy of 0.881 (see [results](#results)). See the [roadmap](#roadmap) for what's next.
+> 🚧 **Work in progress.** Phases 0–2 are done: the best model, DCN-v2, reaches a test AUC of 0.737 and normalised entropy of 0.878 (see [model comparison](#model-comparison-phase-2)). See the [roadmap](#roadmap) for what's next.
 
 ## Why
 
@@ -18,7 +18,7 @@ Only the labelled `train.gz` file is used. It's split **by day, not at random**:
 
 - [x] **0. Scaffold:** packaging with `uv`, lint, tests, CI on synthetic data, data download
 - [x] **1. Baseline:** hashed logistic regression; log loss, AUC, normalised entropy and calibration
-- [ ] **2. Better models:** LightGBM and a deep CTR model (DCN-v2), calibration, MLflow tracking
+- [x] **2. Better models:** LightGBM and a deep CTR model (DCN-v2), calibration, MLflow tracking
 - [ ] **3. Serving:** FastAPI prediction service in Docker on Cloud Run, with a latency benchmark
 - [ ] **4. Pipeline and monitoring:** Airflow DAG that replays the data day by day to retrain and evaluate, with drift checks
 - [ ] **5. Bidding simulation:** turn predicted CTR into bids under a daily budget and compare clicks per £ with a flat bid
@@ -83,15 +83,61 @@ Reproduce: `uv run python -m ctr.train_baseline --sample-frac 0.05 --seed 0`. It
 
 <br clear="right">
 
+## Model comparison (phase 2)
+
+```bash
+uv run python -m ctr.train --data data/raw/train.gz      # all models, about 5 minutes
+uv run mlflow ui --backend-store-uri sqlite:///mlflow.db  # browse the logged runs
+```
+
+Three models trained on the same split and sample as phase 1:
+
+- **Logistic regression:** the phase 1 baseline, with C fixed at 0.1.
+- **LightGBM:** inputs are how often each value appeared in training, plus category codes for each field's 100 most common values. Boosting stops when day-9 log loss stops improving.
+- **DCN-v2** ([Wang et al., 2021](https://arxiv.org/abs/2008.13535)) in PyTorch: a 16-dimensional embedding per field value (values seen fewer than 5 times share one), 3 cross layers and a 256→128 MLP. Training stops when day-9 log loss stops improving, and the best epoch's weights are kept.
+
+Each model also gets a **Platt-scaled** version, `sigmoid(a·logit(p) + b)` fitted on day 9. It changes the probabilities but not their order, so AUC is unchanged. Every run is logged to MLflow with its settings, metrics and timings.
+
+### Results
+
+Test day: 30 October 2014, 211,251 impressions, click rate 16.95%.
+
+| Model | Log loss | Normalised entropy | AUC | Calibration ratio | ECE | Training time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Constant | 0.45510 | 0.9926 | 0.5000 | 1.013 | 0.0021 | – |
+| Logistic regression | 0.40379 | 0.8807 | 0.7360 | 1.019 | 0.0077 | 142 s |
+| + Platt | 0.40400 | 0.8812 | 0.7360 | 0.951 | 0.0083 | |
+| LightGBM (329 rounds) | 0.40357 | 0.8802 | 0.7365 | 1.067 | 0.0114 | 35 s |
+| + Platt | 0.40306 | 0.8791 | 0.7365 | 0.990 | 0.0073 | |
+| DCN-v2 (1 epoch) | 0.40272 | 0.8784 | 0.7369 | 0.942 | 0.0097 | 103 s |
+| + Platt | **0.40243** | **0.8777** | **0.7369** | 0.954 | 0.0089 | |
+
+<img src="docs/phase2_reliability.png" alt="Reliability plot for all models on the test day: logistic regression and LightGBM sit close to the diagonal, DCN-v2 slightly above it" width="400" align="right">
+
+- **The models are almost tied.** DCN-v2 with Platt scaling is best, but its log loss is only 0.34% lower than logistic regression's (LightGBM with Platt scaling: 0.18%). I haven't tested whether gaps this small are significant. On 21 anonymised ID fields with 1.6M training rows, a well-regularised linear model already captures most of the signal; the extra capacity of trees and cross layers adds little.
+- **LightGBM trains 4× faster** than logistic regression (35 s vs 142 s) for slightly better accuracy, which matters for daily retraining.
+- **DCN-v2 overfits after one epoch.** Training loss kept falling in epoch 2 (0.416 → 0.391) while validation loss rose (0.381 → 0.383). This is the well-known "one-epoch" behaviour of CTR models with large embedding tables.
+- **Calibrating on day 9 can backfire.** Day 9's click rate (15.57%) is well below the training days' (17.16%) and day 10's (16.95%). Platt scaling learns to shift every prediction down, which overcorrects on day 10: logistic regression's calibration ratio goes from 1.019 to 0.951. A calibrator should be fitted on a window close to and representative of serving traffic, which phase 4's daily retraining will test.
+- **Batch scoring costs 8–13 µs per row** on a laptop CPU for every model, well under a real-time bidding budget. Single-request latency is phase 3.
+
+These are single runs on a 5% sample with one seed. Next steps that could move the numbers: more data, tuning, and a significance test (a paired bootstrap over test impressions).
+
+<br clear="right">
+
 ## Project layout
 
 ```
 src/ctr/
   schema.py          column definitions for the Avazu data
   data.py            loading, sampling and day-based train/valid/test split
-  features.py        hashing-trick featuriser
+  features.py        hashing-trick featuriser (logistic regression)
+  encoders.py        vocabulary and count encodings fitted on training days
+  models/            logreg.py, gbm.py (LightGBM), dcn.py (DCN-v2 in PyTorch)
+  calibration.py     Platt scaling
   metrics.py         log loss, normalised entropy, calibration
-  train_baseline.py  phase 1 training and evaluation (CLI)
+  train_baseline.py  phase 1: logistic regression with a C search (CLI)
+  train.py           phase 2: train, calibrate and compare models (CLI)
+  tracking.py        MLflow logging
   report.py          metrics.json, results table, reliability plot
   sample.py          synthetic Avazu-format data for tests and CI
 scripts/

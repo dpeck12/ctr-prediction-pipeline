@@ -14,7 +14,6 @@ import json
 import logging
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -25,19 +24,14 @@ from sklearn.metrics import log_loss
 from ctr.data import load_avazu, split_by_day
 from ctr.features import HashingFeaturizer
 from ctr.metrics import evaluate
-from ctr.report import write_report
+from ctr.report import ExperimentResult, write_report
 from ctr.schema import LABEL, TIMESTAMP
 
 log = logging.getLogger(__name__)
 
 DEFAULT_C_GRID = (0.001, 0.01, 0.1, 1.0)
 
-
-@dataclass
-class BaselineResult:
-    summary: dict
-    y_test: np.ndarray
-    test_predictions: dict[str, np.ndarray] = field(default_factory=dict)
+BaselineResult = ExperimentResult  # kept so existing imports keep working
 
 
 def _day_range(df: pd.DataFrame) -> list[str]:

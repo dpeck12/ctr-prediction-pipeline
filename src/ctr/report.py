@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from ctr.metrics import calibration_table  # noqa: E402
 
-if TYPE_CHECKING:
-    from ctr.train_baseline import BaselineResult
+
+@dataclass
+class ExperimentResult:
+    """Everything a run produces: the summary dict and the test-day predictions per model."""
+
+    summary: dict
+    y_test: np.ndarray
+    test_predictions: dict[str, np.ndarray] = field(default_factory=dict)
+
 
 METRICS = [
     ("log_loss", "Log loss", "{:.5f}"),
@@ -49,7 +57,7 @@ def results_markdown(summary: dict) -> str:
     )
 
 
-def plot_reliability(result: BaselineResult, path: Path, n_bins: int = 10) -> None:
+def plot_reliability(result: ExperimentResult, path: Path, n_bins: int = 10) -> None:
     fig, ax = plt.subplots(figsize=(5, 5))
     hi = 0.0
     for name, preds in result.test_predictions.items():
@@ -71,7 +79,7 @@ def plot_reliability(result: BaselineResult, path: Path, n_bins: int = 10) -> No
     plt.close(fig)
 
 
-def write_report(result: BaselineResult, out_dir: Path) -> None:
+def write_report(result: ExperimentResult, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "metrics.json").write_text(json.dumps(result.summary, indent=2))
     (out_dir / "results.md").write_text(results_markdown(result.summary))

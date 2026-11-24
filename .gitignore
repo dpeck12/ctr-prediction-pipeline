@@ -1,6 +1,6 @@
 # Data and model outputs never go in git
-data/
-models/
+/data/
+/models/
 mlruns/
 mlartifacts/
 
@@ -28,4 +28,5 @@ kaggle.json
 .idea/
 .DS_Store
 Thumbs.db
-reports/
+/reports/
+mlflow.db
