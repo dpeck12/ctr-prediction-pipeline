@@ -73,6 +73,7 @@ jobs:
       AIRFLOW_VERSION: "3.4.0"
       AIRFLOW_HOME: ${{ github.workspace }}/.airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: ${{ github.workspace }}/airflow/dags
     steps:
       - uses: actions/checkout@v4
 

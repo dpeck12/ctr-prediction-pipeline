@@ -28,6 +28,7 @@ def dag(tmp_path_factory):
     make_synthetic(n_rows=20_000, n_days=10, seed=6).to_csv(csv, index=False)
     write_days(load_avazu(csv), Paths.from_root(root).data)
     os.environ["CTR_ROOT"] = str(root)
+    os.environ["AIRFLOW__CORE__DAGS_FOLDER"] = str(DAGS)  # bundle path must exist
     os.environ["CTR_MODEL_KWARGS"] = json.dumps({"n_estimators": 50})
 
     from airflow.dag_processing.dagbag import DagBag
